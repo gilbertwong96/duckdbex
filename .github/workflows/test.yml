@@ -1,0 +1,78 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} OTP ${{ matrix.otp }} / Elixir ${{ matrix.elixir }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      MIX_ENV: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            otp: "27.0"
+            elixir: "1.17.3"
+          - os: macos-14
+            otp: "27.0.1"
+            elixir: "1.17.2"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Setup Mix
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Cache deps
+        uses: actions/cache@v6
+        with:
+          path: deps
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Get dependencies
+        run: mix deps.get
+
+      # Restored before the sources are generated so `prepare-duckdb` finds a
+      # matching archive checksum and skips re-extracting, which keeps the
+      # object mtimes newer than the sources and makes the build incremental.
+      - name: Cache DuckDB sources and objects
+        uses: actions/cache@v6
+        with:
+          path: |
+            c_src/duckdb
+            _build/test/lib/duckdbex/priv
+          key: ${{ runner.os }}-duckdb-${{ hashFiles('mix.exs', 'Makefile', 'c_src/*.cpp', 'c_src/*.h') }}
+          restore-keys: |
+            ${{ runner.os }}-duckdb-
+
+      - name: Generate vendored DuckDB sources
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(sed -n 's/.*@duckdb_version "\(.*\)".*/\1/p' mix.exs)"
+          bin/regen_duckdb.sh "v${version}"
+
+      - name: Run tests
+        run: mix test
